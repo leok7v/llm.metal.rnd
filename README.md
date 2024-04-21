@@ -20,9 +20,13 @@ Metal is a modern, fully-programmable graphics-API first and foremost. Many of t
 
 ## CUDA to Metal Glossary
 CUDA -> Metal
+
 Thread -> Thread
+
 Warp ~> SIMD group
+
 Thread Block -> Threadgroup
+
 Grid ~> Similar but Metal (on M-series at least) supports non-uniform threadgroups.
 
 I'll defer to [the documentation](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf) for the definitive spec. One thing that's cool is that there are a lot more builtins for thread indices. Like you can get the absolute thread index in grid directly and non-uniform threadgroup sizes means you don't need to worry about boundary conditions unless you dispatch your kernel via the other API (that I'm not using in metal_compute.h). There are also builtins your kernel can use for totals like threadgroup size, simd size, etc. to determine more about your execution context. 
