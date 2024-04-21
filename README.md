@@ -1,7 +1,7 @@
 # llm.metal
 This is a fork of [Andrej Karpathy's llm.c](https://github.com/karpathy/llm.c) but ported to run using Metal Compute Shaders (not MPS except for GEMM) instead of CUDA. 
 
-Right now only the forward pass is implemented. Things are still very much a work in progress and catching up to where things are on the CUDA side of things. For my system (M2 Max 12-core 96GB) the CPU code with OpenMP enabled is running at about ~460ms per batch (64 sequence len) and the metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe.
+Right now only the forward pass is implemented. Things are still very much a work in progress and catching up to where things are on the CUDA side of things. For my system (M2 Max 12-core 96GB) the CPU code with OpenMP enabled is running at about ~460ms per batch (64 sequence len backward/update commented out) and the metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe.
 
 ## Quick Start (Metal)
 Right now only Apple Silicon devices are supported.
