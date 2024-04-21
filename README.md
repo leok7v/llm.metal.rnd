@@ -6,8 +6,7 @@ Right now only the forward pass is implemented. Things are still very much a wor
 ## Performance
 For my system (M2 Max 12-core 96GB) the CPU code with OpenMP enabled is running at about ~460ms per batch (64 sequence len backward/update commented out) 
 
-The metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe. I'm focusing on correctness and backward pass for now. But it'll be fun to start micro-benchmarking and optimizing things. I'm very curious to see how far I can take this!
-
+The metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update assuming 64 sequence length. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe. I'm focusing on correctness and backward pass for now. But it'll be fun to start micro-benchmarking and optimizing things. I'm very curious to see how far I can take this! This obviously can't beat a big beefy server-grade GPU but it's still impressive how fast these m-series chips are :)
 ## Quick Start (Metal)
 Right now only Apple Silicon devices are supported.
 ```
