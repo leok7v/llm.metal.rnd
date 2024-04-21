@@ -1,6 +1,18 @@
 # llm.metal
 This is a fork of [Andrej Karpathy's llm.c](https://github.com/karpathy/llm.c) but ported to run using Metal Compute Shaders (not MPS except for GEMM) instead of CUDA. Right now only the forward pass is implemented. Things are still very much a work in progress and catching up to where things are on the CUDA side of things. For my system (M2 Max 12-core 96GB) the CPU code with OpenMP enabled is running at about ~460ms per batch (64 sequence len) and the metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe.
 
+## Quick Start (Metal)
+Right now only Apple Silicon devices are supported.
+```
+# If you don't have Xcode build tools installed already... You most likely will though?
+xcode-select --install
+pip install -r requirements.txt
+python prepro_tinyshakespeare.py
+python train_gpt2.py
+make train_gpt2_metal
+./train_gpt2_metal
+```
+
 ## Some Notes on Metal
 Metal is a modern, fully-programmable graphics-API first and foremost. Many of the conveniences of CUDA are not present when dealing with Metal. There's quite a bit more boilerplate necessary to set things up and dispatch work to the GPU. Another thing is that we have to go through the Obj-C API to interact with Metal. There are cpp and other language wrappers out there that interact with the objc dynamic runtime to provide bindings. The approach I took was to instead wrap only the bits I needed to set up and dispatch compute kernels. This is all exposed in a pure C header file with no Obj-C code. There are quite a few differences between Metal and CUDA especially on the host side of things. One big difference is in how we call our kernels. We have to manually bind each argument to the argument table with an index that matches up with the attribute index defined in the actual kernel code. There is an API for this in metal_compute.h. I want to avoid using C++ or complex macros. On one hand I'm pretty sure I could cook up a clever templated solution to this in cpp but I'd rather A, have this code stay simple and close to llm.c as possible and B, have things compile super fast--introducing cpp is off the table. When it comes to the shader code, it's very similar to CUDA on some level. The terminology and builtins different though.
 
@@ -45,7 +57,7 @@ TODO:
 - [ ] Encoder backward
 - [ ] Revisit softmax kernel. Need to use tiled reductions kernel instead of naive one.
 - [ ] Try to re-use MPSMatrix and MPSMatrixMultiplication instead of creating a new one each time. I doubt this is a big bottle-neck but should be easy to try.
-
+- [ ] Figure out how to better manage Obj-C memory. Need to somehow drain the autorelease pool and force stuff to free up. Can avoid recreating certain things but not others (like command buffers/encoders)
 ---
 [ORIGINAL README]
 ---
