@@ -53,6 +53,7 @@ TODO:
 - [x] Grab some of the new stuff like tokenizer decoder.
 - [x] Test end-to-end to see if model output looks "right".
 - [ ] Ensure all the grad buffers are set up properly and things are ready to implement backward pass.
+- [ ] Make sure we have ground-truth grads or backward pass functions to compare against.
 - [ ] Implement cross-entropy backward pass.
 - [ ] Implement softmax backward pass. Might try fused classifier approach like main repo instead!
 - [ ] Matmul backward
