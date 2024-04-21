@@ -1,4 +1,56 @@
-# llm.c
+# llm.metal
+This is a fork of [Andrej Karpathy's llm.c](https://github.com/karpathy/llm.c) but ported to run using Metal Compute Shaders (not MPS except for GEMM) instead of CUDA. Right now only the forward pass is implemented. Things are still very much a work in progress and catching up to where things are on the CUDA side of things. For my system (M2 Max 12-core 96GB) the CPU code with OpenMP enabled is running at about ~460ms per batch (64 sequence len) and the metal version is around 72ms per step. There is still a lot of low-hanging fruit in terms of optimization, too. I anticipate it should be possible to get things to about 40ms per step (forward only) and around 80-90ms for forward/backward/update. This is about what pytorch seems to be from what I can tell. Pytorch's MPS backend is using MPS Graph framework I believe.
+
+## Some Notes on Metal
+Metal is a modern, fully-programmable graphics-API first and foremost. Many of the conveniences of CUDA are not present when dealing with Metal. There's quite a bit more boilerplate necessary to set things up and dispatch work to the GPU. Another thing is that we have to go through the Obj-C API to interact with Metal. There are cpp and other language wrappers out there that interact with the objc dynamic runtime to provide bindings. The approach I took was to instead wrap only the bits I needed to set up and dispatch compute kernels. This is all exposed in a pure C header file with no Obj-C code. There are quite a few differences between Metal and CUDA especially on the host side of things. One big difference is in how we call our kernels. We have to manually bind each argument to the argument table with an index that matches up with the attribute index defined in the actual kernel code. There is an API for this in metal_compute.h. I want to avoid using C++ or complex macros. On one hand I'm pretty sure I could cook up a clever templated solution to this in cpp but I'd rather A, have this code stay simple and close to llm.c as possible and B, have things compile super fast--introducing cpp is off the table. When it comes to the shader code, it's very similar to CUDA on some level. The terminology and builtins different though.
+
+## CUDA to Metal Glossary
+CUDA -> Metal
+Thread -> Thread
+Warp ~> SIMD group
+Thread Block -> Threadgroup
+Grid ~> Similar but Metal (on M-series at least) supports non-uniform threadgroups.
+
+I'll defer to [the documentation](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf) for the definitive spec. One thing that's cool is that there are a lot more builtins for thread indices. Like you can get the absolute thread index in grid directly and non-uniform threadgroup sizes means you don't need to worry about boundary conditions unless you dispatch your kernel via the other API (that I'm not using in metal_compute.h). There are also builtins your kernel can use for totals like threadgroup size, simd size, etc. to determine more about your execution context. 
+
+## More on this Fork
+Similar to llm.c, this fork is meant as a place for learning and experimentation. 
+**Where things stand:**
+- Right now only the forward pass is implemented. 
+- The test_gpt2*.c file isn't there. I created llm_cpu.c to compare GPU to CPU results and have a CHECK_TENSOR #define that will run each layer through the GPU, copy the activation to another buffer and then re-run the same layer on CPU and write the result to the activations buffer. Then I'm comparing the two activations within 1e-2 tolerance similar to the test code in the original repo. Doing it in this way ensures that each layer receives input that is coming from a "known-good" source since the last thing to write to the activations buffer was the CPU not our potentially broken GPU kernel.
+
+TODO:
+- [x] Set up Metal.
+- [x] Get CPU code into a place where it can be used as an "oracle" for testing.
+- [x] Write a simple shader that does something.
+- [x] Bring over cuda version of train_gpt and comment out all the CUDA bits.
+- [x] Figure out allocation strategy for Metal buffers.
+- [x] Port encoder layer.
+- [x] Port layernorm.
+- [x] Port matmul. (ended up using MPS Gemm)
+- [x] Port attention.
+- [x] Port rest of layers... all downhill from here hopefully!!
+- [x] Test everything against CPU to ensure we get the right activations.
+- [x] Tidy things up and remove old unused code.
+- [x] Grab some of the new stuff like tokenizer decoder.
+- [x] Test end-to-end to see if model output looks "right".
+- [ ] Ensure all the grad buffers are set up properly and things are ready to implement backward pass.
+- [ ] Implement cross-entropy backward pass.
+- [ ] Implement softmax backward pass. Might try fused classifier approach like main repo instead!
+- [ ] Matmul backward
+- [ ] Layernorm backward
+- [ ] Residual backward
+- [ ] Gelu backward
+- [ ] Attention backward
+- [ ] Encoder backward
+- [ ] Revisit softmax kernel. Need to use tiled reductions kernel instead of naive one.
+- [ ] Try to re-use MPSMatrix and MPSMatrixMultiplication instead of creating a new one each time. I doubt this is a big bottle-neck but should be easy to try.
+
+---
+[ORIGINAL README]
+---
+
+#  llm.c
 
 LLM training in simple, pure C/CUDA. There is no need for 245MB of PyTorch or 107MB of cPython. Training GPT-2 (CPU, fp32) is ~1,000 lines of clean code in the single file [train_gpt2.c](train_gpt2.c), and training it on GPU is ~2,000 lines (adds CUDA kernels) in [train_gpt2.cu](train_gpt2.cu). The code compiles and runs instantly, it exactly matches the PyTorch reference implementation, and it ~matches the speed of (compiled) PyTorch (fp32, no flash attention). I chose GPT-2 as the first working example because it is the grand-daddy of LLMs, the first time the modern stack was put together.
 

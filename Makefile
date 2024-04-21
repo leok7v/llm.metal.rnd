@@ -43,7 +43,18 @@ endif
 .PHONY: all train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu
 
 # default target is all
-all: train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu
+all: train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu train_gpt2_metal
+
+# Metal shader compilation
+gpt2.air: gpt2.metal
+	xcrun -sdk macosx metal -c $< -o $@
+
+default.metallib: gpt2.air
+	xcrun -sdk macosx metallib $< -o $@
+
+# Build the train gpt2 metal target. Need to link the appropriate Metal Obj-C frameworks.
+train_gpt2_metal: train_gpt2_metal.c metal_compute.m llm_cpu.c | default.metallib
+	clang -Ofast -Imetal_compute.h -framework Foundation -framework Metal -framework MetalPerformanceShaders $^ -o $@
 
 train_gpt2: train_gpt2.c
 	$(CC) $(CFLAGS) $(INCLUDES) $(LDFLAGS) $< $(LDLIBS) -o $@
@@ -62,5 +73,5 @@ profile_gpt2cu: profile_gpt2.cu
 	nvcc -O3 --use_fast_math -lineinfo $< -lcublas -lcublasLt -o $@
 
 clean:
-	rm -f train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu
+	rm -f train_gpt2 test_gpt2 train_gpt2cu test_gpt2cu train_gpt2_metal gpt2.air default.metallib
 
