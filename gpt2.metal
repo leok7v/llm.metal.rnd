@@ -312,6 +312,96 @@ kernel void softmax_forward_kernel1(device float* out [[buffer(0)]],
   }
 }
 
+// LogSumExp state for associative parallel reduction
+struct LogSumExpState {
+    float max_val;
+    float sum_exp;
+};
+
+// Associative combine operation for LogSumExp states
+inline LogSumExpState combine_lse_states(LogSumExpState a, LogSumExpState b) {
+    // Handle empty states
+    if (a.sum_exp == 0.0f) return b;
+    if (b.sum_exp == 0.0f) return a;
+    
+    float new_max = max(a.max_val, b.max_val);
+    float correction_a = exp(a.max_val - new_max);
+    float correction_b = exp(b.max_val - new_max);
+    return {new_max, a.sum_exp * correction_a + b.sum_exp * correction_b};
+}
+
+// Kernel 1: Compute LogSumExp reduction for each row
+kernel void logsumexp_kernel(device float* logsumexp_out [[buffer(0)]],
+                             device float* inp [[buffer(1)]],
+                             constant int& N [[buffer(2)]],
+                             constant int& C [[buffer(3)]],
+                             uint idx [[threadgroup_position_in_grid]],
+                             uint tgid [[thread_position_in_threadgroup]],
+                             uint block_size [[threads_per_threadgroup]],
+                             threadgroup LogSumExpState* shared [[threadgroup(0)]]) {
+    
+    // Each threadgroup processes one row
+    if (idx >= (uint)N) return;
+    
+    device float* inp_row = inp + idx * C;
+    
+    // Initialize local state
+    LogSumExpState local_state;
+    local_state.max_val = -INFINITY;
+    local_state.sum_exp = 0.0f;
+    
+    // Each thread processes multiple elements with stride = block_size
+    for (int i = tgid; i < C; i += block_size) {
+        float x = inp_row[i];
+        if (local_state.sum_exp == 0.0f) {
+            // First element for this thread
+            local_state.max_val = x;
+            local_state.sum_exp = 1.0f;
+        } else {
+            // Subsequent elements - use combine function
+            LogSumExpState new_state;
+            new_state.max_val = x;
+            new_state.sum_exp = 1.0f;
+            local_state = combine_lse_states(local_state, new_state);
+        }
+    }
+    
+    // Store local results in shared memory
+    shared[tgid] = local_state;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Parallel reduction in shared memory
+    for (uint stride = block_size / 2; stride > 0; stride /= 2) {
+        if (tgid < stride) {
+            shared[tgid] = combine_lse_states(shared[tgid], shared[tgid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Thread 0 writes the final LogSumExp result
+    if (tgid == 0) {
+        LogSumExpState final_state = shared[0];
+        logsumexp_out[idx] = final_state.max_val + log(final_state.sum_exp);
+    }
+}
+
+// Kernel 2: Compute softmax values using precomputed LogSumExp
+kernel void softmax_from_lse_kernel(device float* out [[buffer(0)]],
+                                    device float* inp [[buffer(1)]],
+                                    device float* logsumexp [[buffer(2)]],
+                                    constant int& N [[buffer(3)]],
+                                    constant int& C [[buffer(4)]],
+                                    uint tid [[thread_position_in_grid]]) {
+    
+    if (tid >= (uint)(N * C)) return;
+    
+    uint row = tid / C;
+    uint col = tid % C;
+    
+    float log_sum_exp = logsumexp[row];
+    out[tid] = exp(inp[tid] - log_sum_exp);
+}
+
 kernel void softmax_forward_kernel4(device float* out [[buffer(0)]],
                                     device float* inp [[buffer(1)]],
                                     constant uint& N [[ buffer(2) ]],
