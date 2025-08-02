@@ -36,6 +36,8 @@
 
 #define CHECK_TENSORS 0
 
+const float infinity = (__builtin_inff()); // Use built-in infinity to avoid warnings
+
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
 
@@ -77,7 +79,7 @@ int check_tensor(float *a, float *b, size_t n, char *label) {
   printf("%s\n", label);
   for (int i = 0; i < n; i++) {
     if (fabsf(a[i] - b[i]) <= 1e-2 ||
-        (a[i] == -INFINITY && b[i] == -INFINITY)) {
+        (a[i] == -infinity && b[i] == -infinity)) {
       if (i < print_upto) {
         printf("OK ");
       }
@@ -553,7 +555,7 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   // Note: This debug code needs access to LogSumExp values, which are inside softmax_forward_lse function
   printf("\nDebugging problematic LogSumExp values:\n");
   printf("Row 4 input at col 198: inp[4*V+198]=%.10f, max in row=", inp[4*V + 198]);
-  float max_in_row = -INFINITY;
+  float max_in_row = -infinity;
   for (int i = 0; i < V; i++) {
     if (inp[4*V + i] > max_in_row) max_in_row = inp[4*V + i];
   }
@@ -564,7 +566,7 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
          inp[4*V + 196], inp[4*V + 197], inp[4*V + 198], inp[4*V + 199], inp[4*V + 200]);
   
   // Manual LogSumExp calculation for row 4
-  float manual_max = -INFINITY;
+  float manual_max = -infinity;
   for (int i = 0; i < V; i++) {
     if (inp[4*V + i] > manual_max) manual_max = inp[4*V + i];
   }
