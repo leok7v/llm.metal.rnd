@@ -325,8 +325,8 @@ inline LogSumExpState combine_lse_states(LogSumExpState a, LogSumExpState b) {
     if (b.sum_exp == 0.0f) return a;
     
     float new_max = max(a.max_val, b.max_val);
-    float correction_a = exp(a.max_val - new_max);
-    float correction_b = exp(b.max_val - new_max);
+    float correction_a = precise::exp(a.max_val - new_max);
+    float correction_b = precise::exp(b.max_val - new_max);
     return {new_max, a.sum_exp * correction_a + b.sum_exp * correction_b};
 }
 
@@ -381,7 +381,7 @@ kernel void logsumexp_kernel(device float* logsumexp_out [[buffer(0)]],
     // Thread 0 writes the final LogSumExp result
     if (tgid == 0) {
         LogSumExpState final_state = shared[0];
-        logsumexp_out[idx] = final_state.max_val + log(final_state.sum_exp);
+        logsumexp_out[idx] = final_state.max_val + precise::log(final_state.sum_exp);
     }
 }
 
@@ -392,14 +392,10 @@ kernel void softmax_from_lse_kernel(device float* out [[buffer(0)]],
                                     constant int& N [[buffer(3)]],
                                     constant int& C [[buffer(4)]],
                                     uint tid [[thread_position_in_grid]]) {
-    
-    if (tid >= (uint)(N * C)) return;
-    
+    if (tid >= (uint)(N * C)) return;    
     uint row = tid / C;
-    uint col = tid % C;
-    
-    float log_sum_exp = logsumexp[row];
-    out[tid] = exp(inp[tid] - log_sum_exp);
+    float z = inp[tid] - logsumexp[row];
+    out[tid] = precise::exp(z);
 }
 
 kernel void softmax_forward_kernel4(device float* out [[buffer(0)]],

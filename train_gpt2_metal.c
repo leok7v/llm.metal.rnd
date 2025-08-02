@@ -524,8 +524,8 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   
   // Find and print the worst differences
   printf("\nWorst 3 differences:\n");
-  printf("Index | Kernel1    | KernelLSE  | Difference | Row | Col\n");
-  printf("------|------------|------------|------------|-----|----\n");
+  printf("Index    | Kernel1    | KernelLSE  | Difference | Row | Col\n");
+  printf("---------|------------|------------|------------|-----|----\n");
   
   for (int worst = 0; worst < 3; worst++) {
     double worst_diff = 0.0;
@@ -542,7 +542,7 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
       // Calculate row and column for this index
       size_t row = worst_idx / V;
       size_t col = worst_idx % V;
-      printf("%5zu | %10.6f | %10.6f | %.2e | %3zu | %5zu\n", 
+      printf("%8zu | %10.6f | %10.6f | %.2e   | %3zu | %3zu\n", 
              worst_idx, out1[worst_idx], out_lse[worst_idx], worst_diff, row, col);
       // Zero out this element so we can find the next worst
       out1[worst_idx] = out_lse[worst_idx];
