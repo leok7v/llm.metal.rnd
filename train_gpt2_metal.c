@@ -192,13 +192,13 @@ void softmax_forward_kernel1(int grid_size, int block_size, float *att,
                preatt, Scalar, &N, Scalar, &C);
 }
 
-void logsumexp_kernel(int grid_size, int block_size, size_t shared_size,
+void lse_kernel(int grid_size, int block_size, size_t shared_size,
                       float *logsumexp_out, float *inp, int N, int C) {
   launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, logsumexp_out,
                Buffer, inp, Scalar, &N, Scalar, &C);
 }
 
-void softmax_from_lse_kernel(int grid_size, int block_size,
+void softmax_forward_lse(int grid_size, int block_size,
                              float *out, float *inp, float *logsumexp, int N, int C) {
   launchKernel(__FUNCTION__, grid_size, block_size, 0, 5, Buffer, out, Buffer,
                inp, Buffer, logsumexp, Scalar, &N, Scalar, &C);
@@ -206,12 +206,6 @@ void softmax_from_lse_kernel(int grid_size, int block_size,
 
 void softmax_forward_kernel_lse(int grid_size, int block_size, size_t shared_size,
                                 float *att, float *preatt, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, att,
-               Buffer, preatt, Scalar, &N, Scalar, &C);
-}
-
-void softmax_forward_kernel4(int grid_size, int block_size, size_t shared_size,
-                             float *att, float *preatt, int N, int C) {
   launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, att,
                Buffer, preatt, Scalar, &N, Scalar, &C);
 }
@@ -311,53 +305,118 @@ void matmul_forward(float *out, float *inp, float *weight, float *bias, int B,
 #endif
 }
 
+void softmax_forward_1(float *out, float *inp, int B, int T, int V) {
+  const int block_size = 128;
+  //  size_t shared_mem_size = 2 * block_size / 32 * sizeof(float);
+  softmax_forward_kernel1(B * T, block_size, out, inp, B * T, V);
+#if CHECK_TENSORS
+  metalCommitCommandsAndWait();
+  size_t gSz = B * T;
+  size_t fSz = sizeof(float);
+  float *g = malloc(fSz * gSz);
+  memcpy(g, out, fSz * gSz);
+  cpu_softmax_forward(out, inp, B, T, V);
+  check_tensor(out, g, gSz, "softmax");
+#endif
+}
+
+void softmax_forward_via_lse(float *out, float *inp, int B, int T, int V) {
+//const int block_size = 128;
+  const int block_size = 512;
+  int N = B * T;  // Number of rows
+
+  printf("DEBUG: LogSumExp kernel dispatch - N=%d, V=%d, B=%d, T=%d\n", N, V, B, T);
+
+  // Allocate temporary buffer for LogSumExp results
+  float *logsumexp_buffer;
+  metalMalloc((void**)&logsumexp_buffer, N * sizeof(float));
+#undef  CHECK_WRITEN_VALUES 
+#define CHECK_WRITEN_VALUES 
+ 
+#ifdef CHECK_WRITEN_VALUES  
+  // Initialize buffer with sentinel values to detect what's actually written
+  for (int i = 0; i < N; i++) {
+    logsumexp_buffer[i] = -999.0f;  // Sentinel value
+  }
+#endif
+
+  // Kernel 1: Compute LogSumExp for each row
+  // For threadgroup-based kernels, grid_size = num_threadgroups * threads_per_threadgroup
+  int total_threads = N * block_size;  // N threadgroups, each with block_size threads
+  size_t shared_mem_size = block_size * 2 * sizeof(float);  // LogSumExpState structs
+//printf("DEBUG: Launching LogSumExp kernel - total_threads=%d, block_size=%d, shared_mem=%zu\n", 
+//        total_threads, block_size, shared_mem_size);
+  lse_kernel(total_threads, block_size, shared_mem_size, logsumexp_buffer, inp, N, V);
+  
+  // Kernel 2: Compute softmax values using LogSumExp results  
+  int total_elements = N * V;
+  // Fix: Use total_threads instead of grid_size, similar to LogSumExp kernel fix
+  int softmax_total_threads = total_elements;  // Total number of threads needed
+  softmax_forward_lse(softmax_total_threads, 1, out, inp, logsumexp_buffer, N, V);
+  
+  // Debugging: Check LogSumExp values for problematic rows
+  metalCommitCommandsAndWait();
+//printf("DEBUG: First 10 LogSumExp values: ");
+//for (int i = 0; i < min(10, N); i++) { printf("%.6f ", logsumexp_buffer[i]); }
+//printf("\n");
+#ifdef CHECK_WRITEN_VALUES  
+  // Count how many values were actually written (not sentinel)
+  int written_count = 0;
+  for (int i = 0; i < N; i++) {
+    if (logsumexp_buffer[i] != -999.0f) {
+      written_count++;
+    }
+  }
+  printf("DEBUG: LogSumExp kernel wrote %d out of %d values\n", written_count, N);
+#endif  
+  // Clean up temporary buffer
+  metalFree(logsumexp_buffer);
+  
+#if CHECK_TENSORS
+  metalCommitCommandsAndWait();
+  size_t gSz = B * T;
+  size_t fSz = sizeof(float);
+  float *g = malloc(fSz * gSz);
+  memcpy(g, out, fSz * gSz);
+  cpu_softmax_forward(out, inp, B, T, V);
+  check_tensor(out, g, gSz, "softmax_lse");
+#endif
+}
+
+#define USE_SOFTMAX_LSE
+#undef  USE_SOFTMAX_LSE
+
+#ifdef USE_SOFTMAX_LSE
+#define softmax_forward softmax_forward_via_lse
+#else
+#define softmax_forward softmax_forward_1
+#endif
+
 void attention_forward(float *out, float *vaccum, float *qkvr, float *preatt,
                        float *att, float *inp, int B, int T, int C, int NH) {
   const int block_size = 128;
   int HS = C / NH; // head size
   // permute and separate inp from (B, T, 3, NH, HS) to 3X (B, NH, T, HS)
-  float *q, *k, *v;
-  q = qkvr + 0 * B * T * C;
-  k = qkvr + 1 * B * T * C;
-  v = qkvr + 2 * B * T * C;
-  int total_threads = B * NH * T * HS;
-  permute_kernel(total_threads, block_size, q, k, v, inp, B, T, NH, HS);
+  float *q = qkvr + 0 * B * T * C;
+  float *k = qkvr + 1 * B * T * C;
+  float *v = qkvr + 2 * B * T * C;
+  permute_kernel(B * NH * T * HS, block_size, q, k, v, inp, B, T, NH, HS);
   const float alpha = 1.0f;
   const float beta = 0.0f;
   // (B, NH, T, HS) • (B, NH, T, HS)^T -> (B, NH, T, T)
   metalCheck(metalSgemmBatched(false, true, T, HS, T, HS, q, k, preatt, B * NH,
                                alpha, beta));
   // multiply all elements of preatt elementwise by scale
-  float scale = 1.0 / sqrtf(HS);
-  total_threads = B * NH * T * T;
-  scale_kernel(total_threads, block_size, preatt, scale, B, NH, T);
-  int softmax_block_size = 128;
-  int grid_size = B * NH * T;
-  // TODO: Implement better softmax
-  //  size_t shared_mem_size = 2 * softmax_block_size / 32 * sizeof(float);
-  //  softmax_forward_kernel4(grid_size, softmax_block_size,
-  //                          shared_mem_size, att, preatt,
-  //                          B * NH * T * T, T);
-  // softmax. preatt is (B, NH, T, T) but we view it as (B * NH * T, T) and use
-  // the softmax kernel
-  softmax_forward_kernel1(grid_size, softmax_block_size, att, preatt,
-                          B * NH * T, T);
+  const float scale = 1.0 / sqrtf(HS);
+  scale_kernel(B * NH * T * T, block_size, preatt, scale, B, NH, T);
+  softmax_forward_1(att, preatt, B * NH, T, T);
+//softmax_forward_via_lse(att, preatt, B * NH, T, T);
   // v^T • att^T or (B, NH, T, HS)^T • (B, NH, T, T)^T -> (B, NH, HS, T)
   metalCheck(metalSgemmBatched(true, true, T, HS, T, T, v, att, vaccum, B * NH,
                                alpha, beta));
   // re-assemble all head outputs side by side
-  grid_size = B * NH * HS * T;
   // permute B, NH, HS, T ->  B, T, NH, HS
-  unpermute_kernel(grid_size, block_size, vaccum, out, B, T, NH, HS);
-#if CHECK_TENSORS
-  metalCommitCommandsAndWait();
-  size_t gSz = B * T * NH * HS;
-  size_t fSz = sizeof(float);
-  float *g = malloc(fSz * gSz);
-  memcpy(g, out, fSz * gSz);
-  cpu_attention_forward(out, preatt, att, inp, B, T, C, NH);
-  check_tensor(out, g, gSz, "attention");
-#endif
+  unpermute_kernel(B * NH * HS * T, block_size, vaccum, out, B, T, NH, HS);
 }
 
 void residual_forward(float *out, float *inp1, float *inp2, int N) {
@@ -388,95 +447,14 @@ void gelu_forward(float *out, float *inp, int N) {
 #endif
 }
 
-void softmax_forward_1(float *out, float *inp, int B, int T, int V) {
-  const int block_size = 128;
-  int grid_size = B * T;
-  //  size_t shared_mem_size = 2 * block_size / 32 * sizeof(float);
-  softmax_forward_kernel1(grid_size, block_size, out, inp, B * T, V);
-#if CHECK_TENSORS
-  metalCommitCommandsAndWait();
-  size_t gSz = B * T;
-  size_t fSz = sizeof(float);
-  float *g = malloc(fSz * gSz);
-  memcpy(g, out, fSz * gSz);
-  cpu_softmax_forward(out, inp, B, T, V);
-  check_tensor(out, g, gSz, "softmax");
-#endif
-}
-
-void softmax_forward_lse(float *out, float *inp, int B, int T, int V) {
-  const int block_size = 128;
-  int N = B * T;  // Number of rows
-
-  // printf("DEBUG: LogSumExp kernel dispatch - N=%d, V=%d, B=%d, T=%d\n", N, V, B, T);
-
-  // Allocate temporary buffer for LogSumExp results
-  float *logsumexp_buffer;
-  metalMalloc((void**)&logsumexp_buffer, N * sizeof(float));
-  
-  // Initialize buffer with sentinel values to detect what's actually written
-  for (int i = 0; i < N; i++) {
-    logsumexp_buffer[i] = -999.0f;  // Sentinel value
-  }
-  
-  // Kernel 1: Compute LogSumExp for each row
-  // For threadgroup-based kernels, grid_size = num_threadgroups * threads_per_threadgroup
-  int total_threads = N * block_size;  // N threadgroups, each with block_size threads
-  size_t shared_mem_size = block_size * 2 * sizeof(float);  // LogSumExpState structs
-//printf("DEBUG: Launching LogSumExp kernel - total_threads=%d, block_size=%d, shared_mem=%zu\n", 
-//        total_threads, block_size, shared_mem_size);
-  logsumexp_kernel(total_threads, block_size, shared_mem_size, logsumexp_buffer, inp, N, V);
-  
-  // Kernel 2: Compute softmax values using LogSumExp results  
-  int total_elements = N * V;
-  // Fix: Use total_threads instead of grid_size, similar to LogSumExp kernel fix
-  int softmax_total_threads = total_elements;  // Total number of threads needed
-  softmax_from_lse_kernel(softmax_total_threads, 1, out, inp, logsumexp_buffer, N, V);
-  
-  // Debugging: Check LogSumExp values for problematic rows
-  metalCommitCommandsAndWait();
-//printf("DEBUG: First 10 LogSumExp values: ");
-//for (int i = 0; i < min(10, N); i++) { printf("%.6f ", logsumexp_buffer[i]); }
-//printf("\n");
-  
-  // Count how many values were actually written (not sentinel)
-  int written_count = 0;
-  for (int i = 0; i < N; i++) {
-    if (logsumexp_buffer[i] != -999.0f) {
-      written_count++;
-    }
-  }
-//printf("DEBUG: LogSumExp kernel wrote %d out of %d values\n", written_count, N);
-  
-  // Clean up temporary buffer
-  metalFree(logsumexp_buffer);
-  
-#if CHECK_TENSORS
-  metalCommitCommandsAndWait();
-  size_t gSz = B * T;
-  size_t fSz = sizeof(float);
-  float *g = malloc(fSz * gSz);
-  memcpy(g, out, fSz * gSz);
-  cpu_softmax_forward(out, inp, B, T, V);
-  check_tensor(out, g, gSz, "softmax_lse");
-#endif
-}
-
-#define USE_SOFTMAX_LSE
-
-#ifdef USE_SOFTMAX_LSE
-#define softmax_forward softmax_forward_lse
-#else
-#define softmax_forward softmax_forward_1
-#endif
-
 // Function to compare precision between kernel1 and kernel_lse
 void compare_softmax_implementations(float *inp, int B, int T, int V) {
   size_t out_size = B * T * V * sizeof(float);
-  float *out1, *out_lse;
+  float *out1, *out_lse, *copy;
   
-  metalMalloc((void**)&out1, out_size);
-  metalMalloc((void**)&out_lse, out_size);
+  metalCheck(metalMalloc((void**)&out1, out_size));
+  metalCheck(metalMalloc((void**)&copy, out_size));
+  metalCheck(metalMalloc((void**)&out_lse, out_size));
   
   printf("Comparing softmax implementations:\n");
   
@@ -485,7 +463,7 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   metalCommitCommandsAndWait();
   
   // Test kernel_lse  
-  softmax_forward_lse(out_lse, inp, B, T, V);
+  softmax_forward_via_lse(out_lse, inp, B, T, V);
   metalCommitCommandsAndWait();
   
   // Compare results
@@ -496,7 +474,8 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   size_t inf_count = 0;
   size_t zero_count_1 = 0;
   size_t zero_count_lse = 0;
-  
+  printf("Total elements: %zu = B: %u * T: %u * V: %u\n", total_elements, B, T, V);
+
   for (size_t i = 0; i < total_elements; i++) {
     if (isnan(out_lse[i])) nan_count++;
     if (isinf(out_lse[i])) inf_count++;
@@ -525,15 +504,17 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   }
   
   // Find and print the worst differences
-  printf("\nWorst 3 differences:\n");
+  printf("\nWorst 10 differences:\n");
   printf("Index    | Kernel1    | KernelLSE  | Difference | Row | Col\n");
   printf("---------|------------|------------|------------|-----|----\n");
-  
-  for (int worst = 0; worst < 3; worst++) {
+  memcpy(copy, out1, out_size);
+  int wx[3];
+  memset(wx, 0xFF, sizeof(wx)); // Initialize to -1 (invalid index)
+  for (int worst = 0; worst < sizeof(wx) / sizeof(wx[0]); worst++) {
     double worst_diff = 0.0;
     size_t worst_idx = 0;
     for (size_t i = 0; i < total_elements; i++) {
-      double diff = fabs(out1[i] - out_lse[i]);
+      double diff = fabs(copy[i] - out_lse[i]);
       if (diff > worst_diff) {
         worst_diff = diff;
         worst_idx = i;
@@ -547,56 +528,32 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
       printf("%8zu | %10.6f | %10.6f | %.2e   | %3zu | %3zu\n", 
              worst_idx, out1[worst_idx], out_lse[worst_idx], worst_diff, row, col);
       // Zero out this element so we can find the next worst
-      out1[worst_idx] = out_lse[worst_idx];
+      copy[worst_idx] = out_lse[worst_idx];
+      wx[worst] = worst_idx; // Store the index of the worst difference
     }
   }
-  
-  // Debug: Check input values for problematic rows to understand LSE issues
-  // Note: This debug code needs access to LogSumExp values, which are inside softmax_forward_lse function
-  printf("\nDebugging problematic LogSumExp values:\n");
-  printf("Row 4 input at col 198: inp[4*V+198]=%.10f, max in row=", inp[4*V + 198]);
-  float max_in_row = -infinity;
-  for (int i = 0; i < V; i++) {
-    if (inp[4*V + i] > max_in_row) max_in_row = inp[4*V + i];
+  for (int j = 0; j < sizeof(wx) / sizeof(wx[0]) && wx[j] >= 0; j++) {
+    size_t idx = wx[j];
+    size_t row = idx / V;
+    size_t col = idx % V;
+    printf("Worst %d: Index %zu, Row %zu, Col %zu\nkernel1: %.10f kernel_lse: %.10f  diff: %.2e\n",
+           j + 1, idx, row, col, out1[idx], out_lse[idx], fabs(out1[idx] - out_lse[idx]));
+    float max_in_row = -infinity;
+    printf("row: %zu col: %zu: %.10f, max in row=", row, col, inp[row * V + col]);
+    for (int i = 0; i < V; i++) {
+      if (inp[row * V + i] > max_in_row) max_in_row = inp[row * V + i];
+    }
+    printf("%.10f\n", max_in_row);
+    float manual_sum = 0.0f;
+    for (int i = 0; i < V; i++) {
+      manual_sum += exp(inp[row * V + i] - max_in_row);   
+    }
+    float manual_lse = max_in_row + log(manual_sum);
+    printf("Manual LSE calculation for row %zu: max=%.10f, sum=%.10f, lse=%.10f\n", 
+           row, max_in_row, manual_sum, manual_lse);
+    printf("Expected softmax[%zu] = exp(%.10f - %.10f) = %.10f\n\n",
+           idx, inp[idx], manual_lse, exp(inp[idx] - manual_lse));   
   }
-  printf("%.10f\n", max_in_row);
-  
-  // Check if it's a row where all values are the same
-  printf("Row 4 values around 198: [%.10f, %.10f, %.10f, %.10f, %.10f]\n",
-         inp[4*V + 196], inp[4*V + 197], inp[4*V + 198], inp[4*V + 199], inp[4*V + 200]);
-  
-  // Manual LogSumExp calculation for row 4
-  float manual_max = -infinity;
-  for (int i = 0; i < V; i++) {
-    if (inp[4*V + i] > manual_max) manual_max = inp[4*V + i];
-  }
-  float manual_sum = 0.0f;
-  for (int i = 0; i < V; i++) {
-    manual_sum += exp(inp[4*V + i] - manual_max);
-  }
-  float manual_lse = manual_max + log(manual_sum);
-  printf("Manual LSE calculation for row 4: max=%.10f, sum=%.10f, lse=%.10f\n", 
-         manual_max, manual_sum, manual_lse);
-  printf("Expected softmax[4*V+198] = exp(%.10f - %.10f) = %.10f\n",
-         inp[4*V + 198], manual_lse, exp(inp[4*V + 198] - manual_lse));
-  
-  // Check if column 198 is consistently problematic across different rows
-  printf("\nChecking column 198 across multiple rows:\n");
-  int max_rows = (B*T < 8) ? B*T : 8;
-  for (int row = 0; row < max_rows; row++) {
-    int idx = row * V + 198;
-    printf("Row %d, Col 198: CPU=%.6f, LSE=%.6f, input=%.6f\n", 
-           row, out1[idx], out_lse[idx], inp[idx]);
-  }
-  
-  // Check columns around 198 for row 1 to see if it's specific to col 198
-  printf("\nChecking columns around 198 for row 1:\n");
-  for (int col = 196; col <= 200; col++) {
-    int idx = 1 * V + col;
-    printf("Row 1, Col %d: CPU=%.6f, LSE=%.6f, diff=%.6f\n", 
-           col, out1[idx], out_lse[idx], fabs(out1[idx] - out_lse[idx]));
-  }
-  
   metalFree(out1);
   metalFree(out_lse);
 }
@@ -786,6 +743,7 @@ void gpt2_build_from_checkpoint(GPT2 *model, char *checkpoint_path) {
   model->config.channels = C = model_header[6];
   printf("[GPT-2]\n");
   printf("max_seq_len: %d\n", maxT);
+  printf("batch_size: %d\n", model->batch_size);
   printf("vocab_size: %d\n", V);
   printf("num_layers: %d\n", L);
   printf("num_heads: %d\n", NH);
@@ -808,6 +766,7 @@ void gpt2_build_from_checkpoint(GPT2 *model, char *checkpoint_path) {
   model->param_sizes[13] = L * C;
   model->param_sizes[14] = C;
   model->param_sizes[15] = C;
+  
 
   // cound the number of paramaters
   size_t num_parameters = 0;
@@ -1204,10 +1163,10 @@ int main(void) {
 
   initKernels("encoder_forward_kernel2", "mean_kernel", "rstd_kernel",
               "normalization_kernel", "add_bias_kernel", "permute_kernel",
-              "unpermute_kernel", "softmax_forward_kernel4",
+              "unpermute_kernel",
               "residual_forward_kernel", "gelu_kernel",
               "crossentropy_forward_kernel1", "scale_kernel",
-              "softmax_forward_kernel1", "logsumexp_kernel", "softmax_from_lse_kernel", NULL);
+              "softmax_forward_kernel1", "lse_kernel", "softmax_forward_lse", NULL);
 
   // build the DataLoaders from tokens files. for now use tiny_shakespeare if
   // available, else tiny_stories
