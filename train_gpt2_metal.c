@@ -192,25 +192,11 @@ void softmax_forward_kernel1(int grid_size, int block_size, float *att,
                preatt, Scalar, &N, Scalar, &C);
 }
 
-/*
-void max_kernel(int grid_size, int block_size, size_t shared_size,
-                   float *max_out, float *inp, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, 
-               Buffer, max_out, Buffer, inp, Scalar, &N, Scalar, &C);
+void softmax_forward_kernel2(int grid_size, int block_size, int shared_size, float *out,
+                             float *inp, int N, int C) {
+  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, out, Buffer,
+               inp, Scalar, &N, Scalar, &C);
 }
-
-void sum_kernel(int grid_size, int block_size, size_t shared_size,
-                   float *max_out, float *inp, float *maxs, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 5, 
-               Buffer, max_out, Buffer, inp, Buffer, maxs, Scalar, &N, Scalar, &C);
-}
-
-void softmax_forward_kernel2(int grid_size, int block_size, size_t shared_size,
-                                 float *out, float *inp, float *maxs, float *sums, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 6, 
-               Buffer, out, Buffer, inp, Buffer, maxs, Buffer, sums, Scalar, &N, Scalar, &C);
-}
-*/
 
 void unpermute_kernel(int grid_size, int block_size, float *inp, float *out,
                       int B, int T, int NH, int HS) {
@@ -320,26 +306,25 @@ void softmax_forward_1(float *out, float *inp, int B, int T, int V) {
 #endif
 }
 
-/*
 void softmax_forward_2(float *out, float *inp, int B, int T, int V) {
-  const int block_size = 256;
-  int N = B * T;
-  float *maxs = NULL;
-  float *sums = NULL;
-  metalCheck(metalMalloc((void**)&maxs, N * sizeof(float)));
-  metalCheck(metalMalloc((void**)&sums, N * sizeof(float)));
-  max_kernel(N * V, block_size, block_size * sizeof(float), maxs, inp, N, V);
-  sum_kernel(N * V, block_size, block_size * sizeof(float), sums, inp, maxs, N, V);
-  softmax_forward_kernel2(N * V, block_size, block_size * sizeof(float), out, inp, maxs, sums, N, V);
-  metalFree(maxs);
-  metalFree(sums);
+  const int block_size = 128;
+  size_t shared_mem_size = block_size * sizeof(float);
+  softmax_forward_kernel2(B * T * block_size, block_size, shared_mem_size, out, inp, B * T, V);
+#if CHECK_TENSORS
+  metalCommitCommandsAndWait();
+  size_t gSz = B * T;
+  size_t fSz = sizeof(float);
+  float *g = malloc(fSz * gSz);
+  memcpy(g, out, fSz * gSz);
+  cpu_softmax_forward(out, inp, B, T, V);
+  check_tensor(out, g, gSz, "softmax");
+#endif
 }
-*/
 
-#define USE_SOFTMAX_LSE
-#undef  USE_SOFTMAX_LSE
+#undef  USE_SOFTMAX_KERNEL_2
+#define USE_SOFTMAX_KERNEL_2
 
-#ifdef USE_SOFTMAX_LSE
+#ifdef USE_SOFTMAX_KERNEL_2
 #define softmax_forward softmax_forward_2
 #else
 #define softmax_forward softmax_forward_1
@@ -400,7 +385,6 @@ void gelu_forward(float *out, float *inp, int N) {
 #endif
 }
 
-#if 0
 // Function to compare precision between kernel1 and kernel_2
 void compare_softmax_implementations(float *inp, int B, int T, int V) {
   size_t out_size = B * T * V * sizeof(float);
@@ -437,15 +421,13 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   size_t nan_count = 0;
   size_t inf_count = 0;
   size_t zero_count_1 = 0;
-  size_t zero_count_lse = 0;
+  size_t zero_count_2 = 0;
   printf("Total elements: %zu = B: %u * T: %u * V: %u\n", total_elements, B, T, V);
-
   for (size_t i = 0; i < total_elements; i++) {
     if (isnan(out2[i])) nan_count++;
     if (isinf(out2[i])) inf_count++;
     if (out1[i] == 0.0f) zero_count_1++;
-    if (out2[i] == 0.0f) zero_count_lse++;
-    
+    if (out2[i] == 0.0f) zero_count_2++;    
     double diff = fabs(out1[i] - out2[i]);
     max_diff = fmax(max_diff, diff);
     avg_diff += diff;
@@ -457,7 +439,7 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
   printf("Relative max difference: %.2e\n", max_diff / (fabs(out1[0]) + 1e-10));
   printf("NaN count in Kernel2: %zu\n", nan_count);
   printf("Inf count in Kernel2: %zu\n", inf_count);
-  printf("Zero count kernel1: %zu, kernel2: %zu\n", zero_count_1, zero_count_lse);
+  printf("Zero count kernel1: %zu, kernel2: %zu\n", zero_count_1, zero_count_2);
   
   // Print first few values for manual inspection
   printf("First 5 values comparison:\n");
@@ -508,18 +490,17 @@ void compare_softmax_implementations(float *inp, int B, int T, int V) {
     printf("%.10f\n", max_in_row);
     float manual_sum = 0.0f;
     for (int i = 0; i < V; i++) {
-      manual_sum += exp(inp[row * V + i] - max_in_row);   
+      manual_sum += exp(inp[row * V + i] - max_in_row);
     }
-    float manual_lse = max_in_row + log(manual_sum);
+    float softmax = max_in_row + log(manual_sum);
     printf("Manual softmax calculation for row %zu: max=%.10f, sum=%.10f, kernel2=%.10f\n", 
-           row, max_in_row, manual_sum, manual_lse);
+           row, max_in_row, manual_sum, softmax);
     printf("Expected softmax[%zu] = exp(%.10f - %.10f) = %.10f\n\n",
-           idx, inp[idx], manual_lse, exp(inp[idx] - manual_lse));   
+           idx, inp[idx], softmax, exp(inp[idx] - softmax));   
   }
   metalFree(out1);
   metalFree(out2);
 }
-#endif
 
 void crossentropy_forward(float *losses, float *probs, int *targets, int B,
                           int T, int V) {
@@ -1114,129 +1095,6 @@ void tokenizer_free(Tokenizer *tokenizer) {
   }
 }
 
-/*
-test_sum() and test_max() are used to test the sum and max kernels.
-Achieved performance is memory-bound, reaching ~80-100 GB/s bandwidth, 
-close to M3's theoretical 100 GB/s unified memory bandwidth. FLOPs not 
-relevant; the kernels are limited by memory access, not compute. 
-For compute-bound, we'd see closer to 3 TFLOPS. 
-*/
-
-void sum_kernel(int grid_size, int block_size, int shared_size, float *out,
-                float *inp, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, out, Buffer,
-               inp, Scalar, &N, Scalar, &C);
-}
-
-void sum_kernel_test(float *out, float *inp, int B, int T, int V) {
-  for(int bt = 0; bt < B * T; bt++) {
-    for(int v = 0; v < V; v++) {
-      inp[bt * V + v] = (float)(v + bt);
-    }
-  }
-  const int block_size = metalComputePipelineStateMaxTotalThreadsPerThreadgroup();
-  size_t shared_mem_size = block_size * sizeof(float);
-  sum_kernel((B * T) * block_size, block_size, shared_mem_size, out, inp, B * T, V);
-  metalCommitCommandsAndWait();
-  for(int i = 0; i < B * T; i++) {
-    float exp_sum = 0.0f;
-    for(int j = 0; j < V; j++) {
-      exp_sum += (float)(j + i);
-    }
-    if(out[i] != exp_sum) {
-      printf("Mismatch at row %d: got %f expected %f\n", i, out[i], exp_sum);
-    }
-  }
-}
-
-void test_sum() {
-  int B = 4;
-  int T = 64;
-//int V = 50257; // vocab size
-  int V = 4000;  // 4096 * 4096 <= 16,777,215 which 2^24 - 1 float precision limit
-  int N = B * T;
-  float *inp, *out;
-  metalMalloc((void**)&inp, N * V * sizeof(float));
-  metalMalloc((void**)&out, N * sizeof(float));
-  sum_kernel_test(out, inp, B, T, V);
-  metalCommitCommandsAndWait();
-  // Measure performance
-  clock_t start = clock();
-  const int M = 100000; // number of test iterations
-  for(int i = 0; i < M; i++) {
-    sum_kernel(N * 1024, 1024, 1024 * sizeof(float), out, inp, N, V);
-  }
-  metalCommitCommandsAndWait();
-  clock_t end = clock();
-  double time_ms = (double)(end - start) / CLOCKS_PER_SEC * 1000.0 / (double)M;
-  printf("Average time per sum_kernel call: %f ms\n", time_ms);
-  metalFree(inp);
-  metalFree(out);
-}
-
-// In train_gpt2_metal.c add:
-void max_kernel(int grid_size, int block_size, int shared_size, float *out,
-                float *inp, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, out, Buffer,
-               inp, Scalar, &N, Scalar, &C);
-}
-
-void max_kernel_test(float *out, float *inp, int B, int T, int V) {
-//srand(time(NULL));
-  for (int bt = 0; bt < B * T; bt++) {
-    int btV = bt * V;
-    for(int v = 0; v < V; v++) {
-      inp[btV + v] = (float)(v + bt);
-    }
-    for (int i = V-1; i > 0; i--) { // shuffle the last V-1 elements
-      int j = rand() % (i + 1);
-      float temp = inp[btV + i];
-      inp[btV + i] = inp[btV + j];
-      inp[btV + j] = temp;
-    }
-  }
-  const int block_size = metalComputePipelineStateMaxTotalThreadsPerThreadgroup();
-  size_t shared_mem_size = block_size * sizeof(float);
-  max_kernel((B * T) * block_size, block_size, shared_mem_size, out, inp, B * T, V);
-  metalCommitCommandsAndWait();
-  for(int i = 0; i < B * T; i++) {
-    float exp_max = (float)(V - 1 + i);
-    if(fabs(out[i] - exp_max) > 0) {
-      printf("Mismatch at row %d: got %f expected %f\n", i, out[i], exp_max);
-    }
-  }
-}
-
-void test_max() {
-  int B = 4;
-  int T = 64;
-  int V = 50257; // vocab size
-//int V = 4000;
-  int N = B * T;
-  float *inp, *out;
-  metalMalloc((void**)&inp, N * V * sizeof(float));
-  metalMalloc((void**)&out, N * sizeof(float));
-  max_kernel_test(out, inp, B, T, V);
-  metalCommitCommandsAndWait();
-  clock_t start = clock();
-  const int M = 10000; // number of test iterations
-  for(int i = 0; i < M; i++) {
-    max_kernel(N * 1024, 1024, 1024 * sizeof(float), out, inp, N, V);
-  }
-  metalCommitCommandsAndWait();
-  clock_t end = clock();
-  double time_ms = (double)(end - start) / CLOCKS_PER_SEC * 1000.0 / (double)M;
-  printf("Average time per max_kernel call: %f ms\n", time_ms);
-  metalFree(inp);
-  metalFree(out);
-}
-
-void softmax_kernel_fused(int grid_size, int block_size, int shared_size, float *out,
-                          float *inp, int N, int C) {
-  launchKernel(__FUNCTION__, grid_size, block_size, shared_size, 4, Buffer, out, Buffer,
-               inp, Scalar, &N, Scalar, &C);
-}
-
 void softmax_kernel_test(float *out, float *inp, int B, int T, int V) {
   float min_val = +infinity;
   float max_val = -infinity;
@@ -1257,7 +1115,7 @@ void softmax_kernel_test(float *out, float *inp, int B, int T, int V) {
   printf("Softmax test: min_val = %f, max_val = %f\n", min_val, max_val);
   const int block_size = metalComputePipelineStateMaxTotalThreadsPerThreadgroup();
   size_t shared_mem_size = block_size * sizeof(float);
-  softmax_kernel_fused((B * T) * block_size, block_size, shared_mem_size, out, inp, B * T, V);
+  softmax_forward_kernel2((B * T) * block_size, block_size, shared_mem_size, out, inp, B * T, V);
   metalCommitCommandsAndWait();
   float max_diff = 0.0f;
   float max_sum_diff = 0.0f;
@@ -1299,12 +1157,13 @@ void test_softmax() {
   metalMalloc((void**)&out, N * V * sizeof(float));
   softmax_kernel_test(out, inp, B, T, V);
   clock_t start = clock();
-  const int M = 10000;
+  // imprecise noise measurement, try M = 100 * 1000 for better precision 
+  const int M = 1 * 1000; // number of times to call the kernel
   for(int i = 0; i < M; i++) {
-    softmax_kernel_fused(N * 1024, 1024, 1024 * sizeof(float), out, inp, N, V);
+    softmax_forward_kernel2(N * 1024, 1024, 1024 * sizeof(float), out, inp, N, V);
   }
-  metalCommitCommandsAndWait();
   clock_t end = clock();
+  metalCommitCommandsAndWait();
   double time_ms = (double)(end - start) / CLOCKS_PER_SEC * 1000.0 / (double)M;
   printf("Average time per softmax_kernel_fused call: %f ms\n", time_ms);
   metalFree(inp);
@@ -1322,8 +1181,7 @@ int main(void) {
               "unpermute_kernel",
               "residual_forward_kernel", "gelu_kernel",
               "crossentropy_forward_kernel1", "scale_kernel",
-              "softmax_forward_kernel1", 
-              "sum_kernel", "max_kernel", "softmax_kernel_fused",
+              "softmax_forward_kernel1", "softmax_forward_kernel2",
               NULL);
 
   // build the DataLoaders from tokens files. for now use tiny_shakespeare if
@@ -1346,10 +1204,8 @@ int main(void) {
   DataLoader val_loader;
   dataloader_init(&val_loader, val_tokens, B, T);
   printf("val dataset num_batches: %d\n", val_loader.num_batches);
-  int val_num_batches = 5;
+  int val_num_batches = 128;
   test_softmax();
-  test_sum();
-  test_max();
   // See how logits behave:
   gpt2_forward(&model, val_loader.inputs, val_loader.targets, B, T);
   metalCommitCommandsAndWait();
@@ -1364,19 +1220,17 @@ int main(void) {
     }
   }
   printf("logits min: %f, max: %f\n", min_val, max_val);
-  exit(0); // exit after the test
-#if 0
   // Test and compare softmax implementations on a small batch
   printf("\n=== Testing Softmax Implementations ===\n");
   dataloader_next_batch(&val_loader);
   gpt2_forward(&model, val_loader.inputs, val_loader.targets, B, T);
-  metalCommitCommandsAndWait();
-  
+  metalCommitCommandsAndWait();  
   // Compare on the final logits (which get fed to softmax)
-  int V = model.config.vocab_size;
   compare_softmax_implementations(model.acts.logits, B, T, V);
   printf("=== End Softmax Test ===\n\n");
-#endif
+
+//exit(0); // exit after the test
+
   // build the Tokenizer
   Tokenizer tokenizer;
   tokenizer_init(&tokenizer, "gpt2_tokenizer.bin");

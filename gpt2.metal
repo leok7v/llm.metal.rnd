@@ -323,73 +323,23 @@ kernel void crossentropy_forward_kernel1(device float* losses [[ buffer(0) ]],
   losses[b * T + t] = -log(probs_bt[ix]);
 }
 
-// testing
+// softmax_forward_kernel2 
+// TODO: try switching "float" to "double" for shared memory
+//       see if precision will become better
 
-kernel void sum_kernel(device float* out [[buffer(0)]],
-                       device float* inp [[buffer(1)]],
-                       constant uint& N [[buffer(2)]],
-                       constant uint& C [[buffer(3)]],
-                       uint block_size [[threads_per_threadgroup]],
-                       uint idx [[threadgroup_position_in_grid]],
-                       uint tgid [[thread_position_in_threadgroup]],
-                       threadgroup float* shared [[threadgroup(0)]]) {
-  device float* x = inp + idx * C;
-  float sum = 0.0f;
-  for (uint i = tgid; i < C; i += block_size) {
-    sum += x[i];
-  }
-  shared[tgid] = sum;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = block_size / 2; stride >= 1; stride /= 2) {
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tgid < stride) {
-      shared[tgid] += shared[tgid + stride];
-    }
-  }
-  if (tgid == 0) {
-    out[idx] = shared[0];
-  }
-}
-
-kernel void max_kernel(device float* out [[buffer(0)]],
-                       device float* inp [[buffer(1)]],
-                       constant uint& N [[buffer(2)]],
-                       constant uint& C [[buffer(3)]],
-                       uint block_size [[threads_per_threadgroup]],
-                       uint idx [[threadgroup_position_in_grid]],
-                       uint tgid [[thread_position_in_threadgroup]],
-                       threadgroup float* shared [[threadgroup(0)]]) {
-  device float* x = inp + idx * C;
-  float maxval = -INFINITY;
-  for (uint i = tgid; i < C; i += block_size) {
-    maxval = fmax(maxval, x[i]);
-  }
-  shared[tgid] = maxval;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = block_size / 2; stride >= 1; stride /= 2) {
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tgid < stride) {
-      shared[tgid] = fmax(shared[tgid], shared[tgid + stride]);
-    }
-  }
-  if (tgid == 0) {
-    out[idx] = shared[0];
-  }
-}
-
-kernel void softmax_kernel_fused(device float* out [[buffer(0)]],
-                                 device float* inp [[buffer(1)]],
-                                 constant uint& N [[buffer(2)]],
-                                 constant uint& C [[buffer(3)]],
-                                 uint simdSize [[thread_execution_width]],
-                                 uint laneID [[thread_index_in_simdgroup]],
-                                 uint tgIdx [[thread_position_in_threadgroup]],
-                                 uint tid [[thread_position_in_grid]],
-                                 uint idx [[threadgroup_position_in_grid]],
-                                 uint bsize [[threads_per_threadgroup]],
-                                 uint simdGroupID [[simdgroup_index_in_threadgroup]],
-                                 uint simdGroupsPerBlock [[simdgroups_per_threadgroup]],
-                                 threadgroup float* shared [[threadgroup(0)]]) {
+kernel void softmax_forward_kernel2(device float* out [[buffer(0)]], // fused
+    device float* inp [[buffer(1)]],
+    constant uint& N [[buffer(2)]],
+    constant uint& C [[buffer(3)]],
+    uint simdSize [[thread_execution_width]],
+    uint laneID [[thread_index_in_simdgroup]],
+    uint tgIdx [[thread_position_in_threadgroup]],
+    uint tid [[thread_position_in_grid]],
+    uint idx [[threadgroup_position_in_grid]],
+    uint bsize [[threads_per_threadgroup]],
+    uint simdGroupID [[simdgroup_index_in_threadgroup]],
+    uint simdGroupsPerBlock [[simdgroups_per_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]]) {
   threadgroup float* maxvals = &shared[0];
   threadgroup float* sumvals = &shared[simdGroupsPerBlock];
   device float* x = inp + idx * C;
