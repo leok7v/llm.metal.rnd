@@ -37,8 +37,31 @@ typedef struct {
   NSMutableArray<id<MTLBuffer>> *buffers;
   NSMutableArray<id<MTLCommandBuffer>> *commandBuffers;
   NSMutableDictionary<NSString *, id<MTLComputePipelineState>> *pipelineStates;
+  int maxTotalThreadsPerThreadgroup;
+  int threadExecutionWidth;
 } MetalState;
-static MetalState gMetalState;
+
+static MetalState gMetalState; // initialized with zeroes
+
+int metalMaxThreadsPerThreadgroup() {
+  assert(gMetalState.device.maxThreadsPerThreadgroup.width > 0);
+  return gMetalState.device.maxThreadsPerThreadgroup.width; 
+}
+
+int metalMaxThreadgroupMemoryLengthInBytes() {
+  assert(gMetalState.device.maxThreadgroupMemoryLength > 0);
+  return gMetalState.device.maxThreadgroupMemoryLength; 
+}
+
+int metalComputePipelineStateMaxTotalThreadsPerThreadgroup() {
+  assert(gMetalState.maxTotalThreadsPerThreadgroup > 0);
+  return gMetalState.maxTotalThreadsPerThreadgroup;
+}
+
+int metalComputePipelineStateThreadExecutionWidth() {
+  assert(gMetalState.threadExecutionWidth > 0);
+  return gMetalState.threadExecutionWidth;
+}
 
 id<MTLCommandBuffer> createCommandBuffer(void) {
   id<MTLCommandBuffer> buf = [gMetalState.queue commandBuffer];
@@ -246,8 +269,26 @@ MetalErrorCode __initKernels(int last, ...) {
     [gMetalState.device newComputePipelineStateWithFunction:fn error:&error];
     if (error) { va_end(args); returnError(MetalErrorPipelineStateCreationFailed); }
     gMetalState.pipelineStates[nameString] = pso;
+    if (gMetalState.maxTotalThreadsPerThreadgroup == 0) {
+      gMetalState.maxTotalThreadsPerThreadgroup = pso.maxTotalThreadsPerThreadgroup;
+    } else {
+      assert(gMetalState.maxTotalThreadsPerThreadgroup ==
+             pso.maxTotalThreadsPerThreadgroup);
+    }
+    if (gMetalState.threadExecutionWidth == 0) {
+      gMetalState.threadExecutionWidth = pso.threadExecutionWidth;
+    } else {
+      assert(gMetalState.threadExecutionWidth == pso.threadExecutionWidth);
+    }
   }
   va_end(args);
+  printf("metalMaxThreadsPerThreadgroup(): %d\n", metalMaxThreadsPerThreadgroup());
+  printf("metalMaxThreadgroupMemoryLengthInBytes(): %d\n",
+         metalMaxThreadgroupMemoryLengthInBytes());
+  printf("metalComputePipelineStateMaxTotalThreadsPerThreadgroup(): %d\n",
+         metalComputePipelineStateMaxTotalThreadsPerThreadgroup());
+  printf("metalComputePipelineStateThreadExecutionWidth(): %d\n",
+         metalComputePipelineStateThreadExecutionWidth());
   return MetalSuccess;
 }
 

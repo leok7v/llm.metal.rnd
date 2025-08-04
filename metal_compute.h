@@ -154,4 +154,8 @@ MetalErrorCode metalSgemmBatched(bool leftT, bool rightT, size_t leftRows,
                                  size_t leftCols, size_t rightRows,
                                  size_t rightCols, float *A, float *B, float *C,
                                  size_t batchCount, float alpha, float beta);
+
+int metalComputePipelineStateMaxTotalThreadsPerThreadgroup(); /* 1024*/
+int metalComputePipelineStateThreadExecutionWidth(); /* 32 */
+
 #endif /* metal_h */

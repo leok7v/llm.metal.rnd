@@ -27,7 +27,6 @@
 using namespace metal;
 
 #define MAX_RANK 5
-#define SIMD_GROUP_SIZE 32 // TODO: Shouldn't hardcode this. Can get it from host API (threadExecutionWidth).
 #define M_PI 3.14159265358979323846264338327950288
 
 inline void flat_to_nd(int index,
@@ -286,93 +285,12 @@ kernel void softmax_forward_kernel1(device float* out [[buffer(0)]],
 
   float sum = 0.0f;
   for (int j = 0; j < C; j++) {
-    out_row[j] = exp(inp_row[j] - maxval);
+    out_row[j] = precise::exp(inp_row[j] - maxval);
     sum += out_row[j];
   }
   for (int j = 0; j < C; j++) {
     out_row[j] /= sum;
   }
-}
-
-// LogSumExp state for associative parallel reduction
-struct lse_state {
-    float max_val;
-    float sum_exp;
-};
-
-// Associative combine operation for LogSumExp states
-inline lse_state combine_lse_states(lse_state a, lse_state b) {
-    // Handle empty states
-    if (a.sum_exp == 0.0f) return b;
-    if (b.sum_exp == 0.0f) return a;
-    float new_max = max(a.max_val, b.max_val);
-    float correction_a = precise::exp(a.max_val - new_max);
-    float correction_b = precise::exp(b.max_val - new_max);
-    return {new_max, a.sum_exp * correction_a + b.sum_exp * correction_b};
-}
-
-// Compute LogSumExp reduction for each row
-kernel void lse_kernel(device float* logsumexp_out [[buffer(0)]],
-                       device float* inp [[buffer(1)]],
-                       constant int& N [[buffer(2)]],
-                       constant int& C [[buffer(3)]],
-                       uint tid [[thread_position_in_grid]],
-                       uint tgid [[thread_position_in_threadgroup]],
-                       uint block_size [[threads_per_threadgroup]],
-                       threadgroup lse_state* shared [[threadgroup(0)]]) {
-    // Each threadgroup processes one row. Calculate row index from global thread id.
-    uint idx = tid / block_size;
-    // Each threadgroup processes one row
-    if (idx >= (uint)N) return;
-    if (idx >= (uint)N) return;
-    device float* inp_row = inp + idx * C;
-    // Initialize local state
-    lse_state local_state;
-    local_state.max_val = -INFINITY;
-    local_state.sum_exp = 0.0f;
-    // Each thread processes multiple elements with stride = block_size
-    for (int i = tgid; i < C; i += block_size) {
-        float x = inp_row[i];
-        if (local_state.sum_exp == 0.0f) {
-            // First element for this thread
-            local_state.max_val = x;
-            local_state.sum_exp = 1.0f;
-        } else {
-            // Subsequent elements - use combine function
-            lse_state new_state;
-            new_state.max_val = x;
-            new_state.sum_exp = 1.0f;
-            local_state = combine_lse_states(local_state, new_state);
-        }
-    }
-    // Store local results in shared memory
-    shared[tgid] = local_state;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    // Parallel reduction in shared memory
-    for (uint stride = block_size / 2; stride > 0; stride /= 2) {
-        if (tgid < stride) {
-            shared[tgid] = combine_lse_states(shared[tgid], shared[tgid + stride]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    // Thread 0 writes the final LogSumExp result
-    if (tgid == 0) {
-        lse_state final_state = shared[0];
-        logsumexp_out[idx] = final_state.max_val + precise::log(final_state.sum_exp);
-    }
-}
-
-// Compute softmax values using precomputed LogSumExp
-kernel void softmax_forward_lse(device float* out [[buffer(0)]],
-                                device float* inp [[buffer(1)]],
-                                device float* logsumexp [[buffer(2)]],
-                                constant int& N [[buffer(3)]],
-                                constant int& C [[buffer(4)]],
-                                uint tid [[thread_position_in_grid]]) {
-    if (tid >= (uint)(N * C)) return;    
-    uint row = tid / C;
-    float z = inp[tid] - logsumexp[row];
-    out[tid] = precise::exp(z);
 }
 
 kernel void residual_forward_kernel(device float* out [[ buffer(0) ]],
@@ -403,4 +321,103 @@ kernel void crossentropy_forward_kernel1(device float* losses [[ buffer(0) ]],
   device float* probs_bt = probs + b * T * V + t * V;
   int ix = targets[b * T + t];
   losses[b * T + t] = -log(probs_bt[ix]);
+}
+
+// testing
+
+kernel void sum_kernel(device float* out [[buffer(0)]],
+                       device float* inp [[buffer(1)]],
+                       constant uint& N [[buffer(2)]],
+                       constant uint& C [[buffer(3)]],
+                       uint block_size [[threads_per_threadgroup]],
+                       uint idx [[threadgroup_position_in_grid]],
+                       uint tgid [[thread_position_in_threadgroup]],
+                       threadgroup float* shared [[threadgroup(0)]]) {
+  device float* x = inp + idx * C;
+  float sum = 0.0f;
+  for (uint i = tgid; i < C; i += block_size) {
+    sum += x[i];
+  }
+  shared[tgid] = sum;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = block_size / 2; stride >= 1; stride /= 2) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tgid < stride) {
+      shared[tgid] += shared[tgid + stride];
+    }
+  }
+  if (tgid == 0) {
+    out[idx] = shared[0];
+  }
+}
+
+kernel void max_kernel(device float* out [[buffer(0)]],
+                       device float* inp [[buffer(1)]],
+                       constant uint& N [[buffer(2)]],
+                       constant uint& C [[buffer(3)]],
+                       uint block_size [[threads_per_threadgroup]],
+                       uint idx [[threadgroup_position_in_grid]],
+                       uint tgid [[thread_position_in_threadgroup]],
+                       threadgroup float* shared [[threadgroup(0)]]) {
+  device float* x = inp + idx * C;
+  float maxval = -INFINITY;
+  for (uint i = tgid; i < C; i += block_size) {
+    maxval = fmax(maxval, x[i]);
+  }
+  shared[tgid] = maxval;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = block_size / 2; stride >= 1; stride /= 2) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tgid < stride) {
+      shared[tgid] = fmax(shared[tgid], shared[tgid + stride]);
+    }
+  }
+  if (tgid == 0) {
+    out[idx] = shared[0];
+  }
+}
+
+kernel void softmax_kernel_fused(device float* out [[buffer(0)]],
+                                 device float* inp [[buffer(1)]],
+                                 constant uint& N [[buffer(2)]],
+                                 constant uint& C [[buffer(3)]],
+                                 uint simdSize [[thread_execution_width]],
+                                 uint laneID [[thread_index_in_simdgroup]],
+                                 uint tgIdx [[thread_position_in_threadgroup]],
+                                 uint tid [[thread_position_in_grid]],
+                                 uint idx [[threadgroup_position_in_grid]],
+                                 uint bsize [[threads_per_threadgroup]],
+                                 uint simdGroupID [[simdgroup_index_in_threadgroup]],
+                                 uint simdGroupsPerBlock [[simdgroups_per_threadgroup]],
+                                 threadgroup float* shared [[threadgroup(0)]]) {
+  threadgroup float* maxvals = &shared[0];
+  threadgroup float* sumvals = &shared[simdGroupsPerBlock];
+  device float* x = inp + idx * C;
+  float maxval = -INFINITY;
+  for (uint i = tgIdx; i < C; i += bsize) { maxval = fmax(maxval, x[i]); }
+  maxval = simd_max(maxval);
+  if (laneID == 0) maxvals[simdGroupID] = maxval;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tgIdx == 0) {
+    float val = maxvals[0];
+    for (uint i = 1; i < simdGroupsPerBlock; i++) { val = fmax(val, maxvals[i]); }
+    maxvals[0] = val;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float offset = maxvals[0];
+  x = out + idx * C;
+  for (uint i = tgIdx; i < C; i += bsize) { x[i] = precise::exp(inp[idx * C + i] - offset); }
+  float sumval = 0.0f;
+  for (uint i = tgIdx; i < C; i += bsize) { sumval += x[i]; }
+  sumval = simd_sum(sumval);
+  if (laneID == 0) { sumvals[simdGroupID] = sumval; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (tgIdx == 0) {
+    float val = sumvals[0];
+    for (uint i = 1; i < simdGroupsPerBlock; ++i) { val += sumvals[i];}
+    sumvals[0] = val; 
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float sum = sumvals[0];
+  for (uint i = tgIdx; i < C; i += bsize) {x[i] /= sum;}
 }
